@@ -59,12 +59,18 @@ function logActivity(message, data = {}) {
 
 // HubSpot webhook endpoint for deals
 app.post('/webhook/deal-created', async (req, res) => {
+    // Log the full request for debugging
+    console.log('Received /webhook/deal-created POST:', {
+        headers: req.headers,
+        body: req.body
+    });
+
     try {
         logActivity('Deal webhook received', { bodyLength: req.body?.length || 0 });
         console.log('Deal webhook received:', req.body);
         
         // Verify webhook (basic check)
-        if (!req.body || !req.body.length) {
+        if (!req.body || !Array.isArray(req.body) || !req.body.length) {
             logActivity('Invalid webhook data received');
             return res.status(400).json({ error: 'Invalid webhook data' });
         }
@@ -114,34 +120,35 @@ app.post('/webhook/email-reply', async (req, res) => {
 async function processEmailReply(event) {
     try {
         const emailId = event.objectId;
-        console.log('Processing email reply ID:', emailId);
+        console.log('📥 Processing email reply ID:', emailId);
 
-        // Get email data from HubSpot
+        // Get email details
         const emailData = await getEmailData(emailId);
-        console.log('Email data retrieved:', emailData);
+        console.log('📨 Email data:', emailData.properties);
 
-        // Check if this is a customer reply (not an outgoing email)
-        if (emailData.properties.hs_email_direction === 'EMAIL' && 
-            emailData.properties.hs_email_status === 'SENT') {
-            return; // Skip outgoing emails
+        const direction = emailData.properties.hs_email_direction;
+        const status = emailData.properties.hs_email_status;
+
+        // ✅ Ensure it's an incoming email (not sent by you)
+        if (direction === 'INCOMING' || (direction === 'EMAIL' && status === 'DELIVERED')) {
+            console.log('✅ Incoming email detected');
+
+            const associations = await getEmailAssociations(emailId);
+
+            const aiResponse = await generateEmailResponse(emailData, associations);
+            console.log('🧠 AI response generated');
+
+            await saveEmailResponseNote(emailId, aiResponse, associations);
+            console.log('📝 AI note saved to HubSpot');
+        } else {
+            console.log('⏩ Skipping outgoing or system email:', { direction, status });
         }
-
-        // Get associated contacts and deals
-        const associations = await getEmailAssociations(emailId);
-        
-        // Generate AI response based on customer email
-        const aiResponse = await generateEmailResponse(emailData, associations);
-        console.log('AI response generated');
-
-        // Save AI response as note to HubSpot
-        await saveEmailResponseNote(emailId, aiResponse, associations);
-        console.log('AI response saved to HubSpot');
-
     } catch (error) {
-        console.error('Error processing email reply:', error);
+        console.error('❌ Error processing email reply:', error.message);
         throw error;
     }
 }
+
 async function processDealCreation(event) {
     try {
         const dealId = event.objectId;
