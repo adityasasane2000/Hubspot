@@ -92,69 +92,215 @@ app.post('/webhook/deal-created', async (req, res) => {
     }
 });
 
-// HubSpot webhook endpoint for customer replies (emails)
+// HubSpot webhook endpoint for customer replies (conversations)
 app.post('/webhook/email-reply', async (req, res) => {
     try {
-        console.log('Email reply webhook received:', req.body);
-        
+        console.log('Conversation webhook received:', req.body);
+
         // Verify webhook (basic check)
-        if (!req.body || !req.body.length) {
+        if (!req.body || !Array.isArray(req.body) || !req.body.length) {
             return res.status(400).json({ error: 'Invalid webhook data' });
         }
 
         // Process each subscription event
         for (const event of req.body) {
-            if (event.subscriptionType === 'communication.creation') {
-                await processEmailReply(event);
+            // Listen for conversation "created" events
+            if (event.object === 'conversation' && event.eventId === 'created') {
+                await processConversationReply(event);
             }
         }
 
-        res.status(200).json({ message: 'Email reply webhook processed successfully' });
+        res.status(200).json({ message: 'Conversation webhook processed successfully' });
     } catch (error) {
-        console.error('Email reply webhook error:', error);
+        console.error('Conversation webhook error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Process email reply from customer
-async function processEmailReply(event) {
+// Process conversation reply (new message in a conversation)
+async function processConversationReply(event) {
     try {
-        const emailId = event.objectId;
-        console.log('📥 Processing email reply ID:', emailId);
+        const conversationId = event.objectId;
+        console.log('📥 Processing conversation ID:', conversationId);
 
-        // Get email details
-        const emailData = await getEmailData(emailId);
-        console.log('📨 Email data:', emailData.properties);
+        // Get conversation details (including latest message)
+        const conversationData = await getConversationData(conversationId);
+        // You may need to adjust the API endpoint and parsing based on HubSpot's API docs
 
-        const direction = emailData.properties.hs_email_direction;
-        const status = emailData.properties.hs_email_status;
+        // Example: Get the latest message and its direction
+        const messages = conversationData.threads?.[0]?.messages || [];
+        const latestMessage = messages[messages.length - 1];
+        if (!latestMessage) {
+            console.log('No messages found in conversation.');
+            return;
+        }
 
-        // ✅ Ensure it's an incoming email (not sent by you)
-        if (direction === 'INCOMING' || (direction === 'EMAIL' && status === 'DELIVERED')) {
-            console.log('✅ Incoming email detected');
+        const direction = latestMessage.direction || latestMessage.senderType; // Adjust as per API
+        const content = latestMessage.text || latestMessage.body || '';
+        const subject = conversationData.subject || 'No Subject';
 
-            const associations = await getEmailAssociations(emailId);
+        // Only process incoming messages (from customer)
+        if (direction === 'INCOMING' || direction === 'VISITOR') {
+            console.log('✅ Incoming conversation message detected');
 
-            const aiResponse = await generateEmailResponse(emailData, associations);
-            console.log('🧠 AI response generated');
+            // Get associations (deals, contacts, etc.)
+            const associations = await getConversationAssociations(conversationId);
 
-            await saveEmailResponseNote(emailId, aiResponse, associations);
-            console.log('📝 AI note saved to HubSpot');
+            // Find all associated deals
+            const dealIds = associations.results
+                .filter(assoc => assoc.type === 'conversation_to_deal')
+                .map(assoc => assoc.id);
+
+            if (dealIds.length === 0) {
+                console.log('No associated deals found for this conversation.');
+                return;
+            }
+
+            // For each associated deal, generate AI response and save note
+            for (const dealId of dealIds) {
+                const aiResponse = await generateConversationResponse(subject, content);
+                console.log('🧠 AI response generated for deal:', dealId);
+
+                await saveEmailResponseNoteToDeal(conversationId, aiResponse, dealId);
+                console.log('📝 AI note saved to HubSpot for deal:', dealId);
+            }
         } else {
-            console.log('⏩ Skipping outgoing or system email:', { direction, status });
+            console.log('⏩ Skipping outgoing or system message:', { direction });
         }
     } catch (error) {
-        console.error('❌ Error processing email reply:', error.message);
+        console.error('❌ Error processing conversation reply:', error.message);
         throw error;
     }
 }
 
+// Fetch conversation details from HubSpot
+async function getConversationData(conversationId) {
+    try {
+        const response = await axios.get(
+            `https://api.hubapi.com/conversations/v3/conversations/${conversationId}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data;
+    } catch (error) {
+        console.error('Error getting conversation data:', error);
+        throw error;
+    }
+}
+
+// Fetch conversation associations (deals, contacts, etc.)
+async function getConversationAssociations(conversationId) {
+    try {
+        const response = await axios.get(
+            `https://api.hubapi.com/conversations/v3/conversations/${conversationId}/associations`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        return response.data;
+    } catch (error) {
+        console.error('Error getting conversation associations:', error);
+        return { results: [] };
+    }
+}
+
+// Generate AI response to conversation message
+async function generateConversationResponse(subject, content) {
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+        const prompt = `
+        A customer has sent us a message. Please generate a professional, helpful response:
+
+        Subject: ${subject}
+        Message: ${content}
+
+        Generate a response that:
+        1. Acknowledges their message professionally
+        2. Addresses their concerns or questions
+        3. Provides helpful information
+        4. Suggests next steps if appropriate
+        5. Maintains a warm, professional tone
+
+        Keep it concise, helpful, and customer-focused.
+        `;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+    } catch (error) {
+        console.error('Error generating conversation response:', error);
+        throw error;
+    }
+}
+
+// Save email response note to a specific deal in HubSpot
+async function saveEmailResponseNoteToDeal(emailId, aiResponse, dealId) {
+    try {
+        const noteData = {
+            engagement: {
+                active: true,
+                type: 'NOTE'
+            },
+            associations: {
+                emailIds: [emailId],
+                dealIds: [dealId]
+            },
+            metadata: {
+                body: `AI-Generated Email Response:\n\n${aiResponse}\n\n--- \nThis is a suggested response to the customer's email. Please review before sending.`
+            }
+        };
+
+        const response = await axios.post(
+            'https://api.hubapi.com/engagements/v1/engagements',
+            noteData,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        return response.data;
+    } catch (error) {
+        console.error('Error saving email response note to HubSpot:', error);
+        throw error;
+    }
+}
+
+// Process deal creation
 async function processDealCreation(event) {
     try {
         const dealId = event.objectId;
         console.log('Processing deal ID:', dealId);
 
         // Get email data from HubSpot
+        const dealData = await getDealData(dealId);
+        console.log('Deal data retrieved:', dealData);
+
+        // Generate email content with AI
+        const emailContent = await generateEmailContent(dealData);
+        console.log('Email content generated');
+
+        // Save note to HubSpot
+        await saveNoteToHubSpot(dealId, emailContent);
+        console.log('Note saved to HubSpot');
+
+    } catch (error) {
+        console.error('Error processing deal:', error);
+        throw error;
+    }
+}
+
+// Get email data from HubSpot
 async function getEmailData(emailId) {
     try {
         const response = await axios.get(
@@ -266,22 +412,6 @@ async function saveEmailResponseNote(emailId, aiResponse, associations) {
         return response.data;
     } catch (error) {
         console.error('Error saving email response note to HubSpot:', error);
-        throw error;
-    }
-}
-        const dealData = await getDealData(dealId);
-        console.log('Deal data retrieved:', dealData);
-
-        // Generate email content with AI
-        const emailContent = await generateEmailContent(dealData);
-        console.log('Email content generated');
-
-        // Save note to HubSpot
-        await saveNoteToHubSpot(dealId, emailContent);
-        console.log('Note saved to HubSpot');
-
-    } catch (error) {
-        console.error('Error processing deal:', error);
         throw error;
     }
 }
