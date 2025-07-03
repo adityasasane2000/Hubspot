@@ -191,7 +191,7 @@ async function getEmailAssociations(emailId) {
 // Generate AI response to customer email
 async function generateEmailResponse(emailData, associations) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         
         const emailInfo = emailData.properties;
         const subject = emailInfo.hs_email_subject || 'No Subject';
@@ -304,7 +304,7 @@ async function getDealData(dealId) {
 // Generate email content using Gemini AI
 async function generateEmailContent(dealData) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
         
         const dealInfo = dealData.properties;
         const prompt = `
