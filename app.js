@@ -95,18 +95,23 @@ app.post('/webhook/deal-created', async (req, res) => {
 // HubSpot webhook endpoint for customer replies (conversations)
 app.post('/webhook/email-reply', async (req, res) => {
     try {
-        console.log('Conversation webhook received:', req.body);
+        console.log('Conversation webhook received:', JSON.stringify(req.body, null, 2));
 
-        // Verify webhook (basic check)
         if (!req.body || !Array.isArray(req.body) || !req.body.length) {
             return res.status(400).json({ error: 'Invalid webhook data' });
         }
 
-        // Process each subscription event
         for (const event of req.body) {
-            // Listen for conversation "created" events
-            if (event.object === 'conversation' && event.eventId === 'created') {
+            // Log the event for debugging
+            console.log('Processing event:', JSON.stringify(event, null, 2));
+            // Try both possible event keys
+            if (
+                (event.object === 'conversation' && (event.eventId === 'created' || event.eventType === 'created')) ||
+                (event.subscriptionType === 'conversation.creation')
+            ) {
                 await processConversationReply(event);
+            } else {
+                console.log('Skipping event, not a conversation creation:', event.object, event.eventId, event.subscriptionType);
             }
         }
 
@@ -123,11 +128,9 @@ async function processConversationReply(event) {
         const conversationId = event.objectId;
         console.log('📥 Processing conversation ID:', conversationId);
 
-        // Get conversation details (including latest message)
         const conversationData = await getConversationData(conversationId);
-        // You may need to adjust the API endpoint and parsing based on HubSpot's API docs
+        console.log('Conversation data:', JSON.stringify(conversationData, null, 2));
 
-        // Example: Get the latest message and its direction
         const messages = conversationData.threads?.[0]?.messages || [];
         const latestMessage = messages[messages.length - 1];
         if (!latestMessage) {
@@ -135,32 +138,38 @@ async function processConversationReply(event) {
             return;
         }
 
-        const direction = latestMessage.direction || latestMessage.senderType; // Adjust as per API
+        const direction = latestMessage.direction || latestMessage.senderType;
         const content = latestMessage.text || latestMessage.body || '';
         const subject = conversationData.subject || 'No Subject';
 
-        // Only process incoming messages (from customer)
+        // Log message details
+        console.log('Latest message:', { direction, content, subject });
+
         if (direction === 'INCOMING' || direction === 'VISITOR') {
             console.log('✅ Incoming conversation message detected');
 
-            // Get associations (deals, contacts, etc.)
             const associations = await getConversationAssociations(conversationId);
+            console.log('Conversation associations:', JSON.stringify(associations, null, 2));
 
-            // Find all associated deals
-            const dealIds = associations.results
-                .filter(assoc => assoc.type === 'conversation_to_deal')
+            // Try multiple possible association types
+            const dealIds = (associations.results || [])
+                .filter(assoc =>
+                    assoc.type === 'conversation_to_deal' ||
+                    assoc.type === 'deal' ||
+                    assoc.type === 'CONVERSATION_TO_DEAL'
+                )
                 .map(assoc => assoc.id);
 
-            if (dealIds.length === 0) {
+            if (!dealIds.length) {
                 console.log('No associated deals found for this conversation.');
                 return;
             }
 
-            // For each associated deal, generate AI response and save note
             for (const dealId of dealIds) {
                 const aiResponse = await generateConversationResponse(subject, content);
                 console.log('🧠 AI response generated for deal:', dealId);
 
+                // Try to use conversationId as emailId, but fallback to only dealId if needed
                 await saveEmailResponseNoteToDeal(conversationId, aiResponse, dealId);
                 console.log('📝 AI note saved to HubSpot for deal:', dealId);
             }
